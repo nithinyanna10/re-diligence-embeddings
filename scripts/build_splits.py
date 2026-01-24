@@ -95,7 +95,7 @@ Use REAL RE diligence vocabulary. Do NOT copy sentences verbatim from chunks.
 
 For each chunk, also generate 3 hard-negative query variants (queries that would match OTHER topics in the same asset but NOT this chunk).
 
-Return STRICT JSON ONLY:
+Return STRICT JSON ONLY with this EXACT structure:
 {{
   "items": [
     {{
@@ -108,6 +108,8 @@ Return STRICT JSON ONLY:
     }}
   ]
 }}
+
+CRITICAL: Each item MUST include the exact "chunk_id" from the CHUNK_ID field above. Do not omit chunk_id.
 
 No markdown, no code blocks, no explanation. Return STRICT JSON ONLY.
 
@@ -124,9 +126,17 @@ def generate_queries_for_chunks(model: str, chunks: List[Dict], seed: int) -> Di
     try:
         response = run_ollama(model, prompt, timeout_s=300)
         result = parse_json_response(response)
+        
+        # Ensure items have chunk_id - add if missing based on order
+        if "items" in result:
+            for idx, item in enumerate(result["items"]):
+                if "chunk_id" not in item and idx < len(chunks):
+                    item["chunk_id"] = chunks[idx]["chunk_id"]
+        
         return result
     except Exception as e:
         print(f"Error generating queries: {e}")
+        # Return empty items but preserve structure
         return {"items": []}
 
 
@@ -255,11 +265,27 @@ def main():
             # Generate queries
             query_result = generate_queries_for_chunks(args.model, batch, args.seed + i)
             
-            for item in query_result.get("items", []):
-                chunk_id = item["chunk_id"]
+            for idx, item in enumerate(query_result.get("items", [])):
+                # Handle missing chunk_id by using batch index
+                chunk_id = item.get("chunk_id")
+                if not chunk_id:
+                    # Fallback: use batch index if chunk_id missing
+                    if idx < len(batch):
+                        chunk_id = batch[idx]["chunk_id"]
+                        item["chunk_id"] = chunk_id  # Fix it for future use
+                    else:
+                        skipped_no_queries += 1
+                        continue
+                
                 chunk = corpus_by_chunk_id.get(chunk_id)
                 if not chunk:
-                    continue
+                    # Try to find by batch index as fallback
+                    if idx < len(batch):
+                        chunk = batch[idx]
+                        chunk_id = chunk["chunk_id"]
+                    else:
+                        skipped_no_queries += 1
+                        continue
                 
                 queries = item.get("queries", [])
                 if not queries:
