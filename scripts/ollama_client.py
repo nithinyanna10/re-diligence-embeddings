@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+Ollama client for local LLM inference.
+Handles subprocess calls to ollama run with JSON-only output enforcement.
+"""
+
+import subprocess
+import json
+import re
+import time
+from typing import Optional
+
+
+def run_ollama(model: str, prompt: str, timeout_s: int = 240, max_retries: int = 2) -> str:
+    """
+    Run Ollama model with prompt and return raw output.
+    
+    Args:
+        model: Ollama model name (e.g., "gemini-3-flash-preview:cloud")
+        prompt: Full prompt string
+        timeout_s: Timeout in seconds
+        max_retries: Maximum retries on JSON parse failure
+    
+    Returns:
+        Raw output string from Ollama
+    
+    Raises:
+        subprocess.TimeoutExpired: If command times out
+        subprocess.CalledProcessError: If command fails
+        ValueError: If JSON extraction fails after retries
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            # Build command: ollama run <model> "<prompt>"
+            # Ollama CLI accepts prompt as a positional argument
+            # For very long prompts, we use stdin as fallback
+            if len(prompt) > 10000:  # Very long prompts via stdin
+                cmd = ["ollama", "run", model]
+                result = subprocess.run(
+                    cmd,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_s,
+                    check=True
+                )
+            else:
+                # Normal prompts as positional argument
+                cmd = ["ollama", "run", model, prompt]
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_s,
+                    check=True
+                )
+            
+            output = result.stdout.strip()
+            
+            # Try to extract JSON if wrapped in markdown or extra text
+            json_match = re.search(r'\{.*\}', output, re.DOTALL)
+            if json_match:
+                output = json_match.group(0)
+            
+            # Validate JSON if possible
+            try:
+                json.loads(output)
+            except json.JSONDecodeError:
+                if attempt < max_retries:
+                    # Retry with repair prompt
+                    repair_prompt = f"""The previous response was not valid JSON. Please return ONLY valid JSON, no markdown, no code blocks, no explanation.
+
+Original request:
+{prompt}
+
+Return STRICT JSON ONLY."""
+                    time.sleep(1)  # Brief delay before retry
+                    continue
+                else:
+                    raise ValueError(f"Failed to extract valid JSON after {max_retries + 1} attempts. Output: {output[:500]}")
+            
+            return output
+            
+        except subprocess.TimeoutExpired:
+            raise TimeoutError(f"Ollama call timed out after {timeout_s}s")
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Ollama command failed: {e.stderr}"
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            raise RuntimeError(error_msg)
+    
+    raise ValueError("Max retries exceeded")
+
+
+def parse_json_response(response: str) -> dict:
+    """
+    Parse JSON from Ollama response, handling markdown code blocks if present.
+    
+    Args:
+        response: Raw response string
+    
+    Returns:
+        Parsed JSON dict
+    
+    Raises:
+        json.JSONDecodeError: If JSON is invalid
+    """
+    # Remove markdown code blocks if present
+    response = re.sub(r'```json\s*', '', response)
+    response = re.sub(r'```\s*', '', response)
+    response = response.strip()
+    
+    # Extract JSON object
+    json_match = re.search(r'\{.*\}', response, re.DOTALL)
+    if json_match:
+        response = json_match.group(0)
+    
+    return json.loads(response)
