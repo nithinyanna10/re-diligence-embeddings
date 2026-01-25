@@ -231,6 +231,9 @@ Return STRICT JSON ONLY with this exact structure:
   ]
 }}
 
+CRITICAL: Each chunk MUST have tags array with 2-6 topic tags. Tags are used for hard negative mining.
+Tags must be from the RE diligence taxonomy: lease, CAM, rent_roll, T12, NOI, capex, title, ALTA, PhaseI, RECs, zoning, permits, insurance, debt_terms, DSCR, debt_yield, TI_LC, estoppel, SNDA, WALE, GPR, vacancy_loss, credit_loss, concessions, rollover, PCA, deferred_maintenance, environmental, survey, easements, zoning_compliance, insurance_coverage, debt_covenants
+
 No markdown, no code blocks, no explanation. Return STRICT JSON ONLY."""
     
     return prompt
@@ -249,34 +252,94 @@ def generate_deal_pack(model: str, asset_metadata: Dict, seed: int) -> Dict[str,
         raise
 
 
+def extract_primary_topic(tags: List[str]) -> str:
+    """Extract primary topic from tags for hard negative mining."""
+    if not tags:
+        return "general"
+    
+    # Priority order for topic extraction
+    topic_priority = [
+        "lease", "CAM", "rent_roll", "T12", "NOI", "capex", "title", "ALTA",
+        "PhaseI", "RECs", "zoning", "permits", "insurance", "debt_terms",
+        "DSCR", "debt_yield", "TI_LC", "estoppel", "SNDA", "WALE", "GPR",
+        "vacancy_loss", "credit_loss", "concessions", "rollover", "PCA",
+        "deferred_maintenance", "environmental", "survey", "easements",
+        "zoning_compliance", "insurance_coverage", "debt_covenants"
+    ]
+    
+    # Find first matching tag in priority order
+    for priority_tag in topic_priority:
+        for tag in tags:
+            if priority_tag.lower() in tag.lower() or tag.lower() in priority_tag.lower():
+                return priority_tag
+    
+    # Fallback to first tag
+    return tags[0].lower() if tags else "general"
+
+
 def write_corpus_chunk(out_file, chunk_data: Dict, doc_data: Dict, asset_metadata: Dict):
-    """Write a single corpus chunk to JSONL."""
+    """Write a single corpus chunk to JSONL with ALL metadata fields."""
+    # Get tags
+    tags = chunk_data.get("tags", doc_data.get("tags", []))
+    if not tags:
+        # Generate default tags based on source_type
+        source_type = doc_data.get("source_type", "CIM")
+        if "CIM" in source_type:
+            tags = ["NOI", "GPR"]
+        elif "Lease" in source_type:
+            tags = ["lease", "WALE"]
+        elif "PhaseI" in source_type or "ESA" in source_type:
+            tags = ["PhaseI", "environmental"]
+        elif "ALTA" in source_type or "Survey" in source_type:
+            tags = ["ALTA", "survey"]
+        elif "Title" in source_type:
+            tags = ["title", "easements"]
+        elif "T12" in source_type or "Operating" in source_type:
+            tags = ["T12", "NOI"]
+        elif "Debt" in source_type:
+            tags = ["debt_terms", "DSCR"]
+        else:
+            tags = ["general"]
+    
+    # Extract primary topic
+    topic = extract_primary_topic(tags)
+    
+    # Ensure ALL required fields are present with defaults
     chunk = {
-        "doc_id": doc_data["doc_id"],
-        "chunk_id": chunk_data["chunk_id"],
-        "text": chunk_data["text"],
-        "title": doc_data["title"],
-        "source_type": doc_data["source_type"],
-        "company": asset_metadata["company"],
+        "doc_id": doc_data.get("doc_id", "doc_unknown"),
+        "chunk_id": chunk_data.get("chunk_id", "chunk_unknown"),
+        "text": chunk_data.get("text", ""),
+        "title": doc_data.get("title", f"Document - {asset_metadata.get('company', 'Unknown')}"),
+        "source_type": doc_data.get("source_type", "CIM"),
+        "company": asset_metadata.get("company", "Unknown Company"),
         "sector": "Real Estate",
-        "deal_stage": asset_metadata["deal_stage"],
-        "date": doc_data["date"],
-        "region": asset_metadata["region"],
-        "doc_url": "",
-        "tags": chunk_data.get("tags", doc_data.get("tags", [])),
+        "deal_stage": asset_metadata.get("deal_stage", "Sourcing"),
+        "date": doc_data.get("date", datetime.now().strftime("%Y-%m-%d")),
+        "region": asset_metadata.get("region", "US-Northeast"),
+        "doc_url": doc_data.get("doc_url", ""),
+        "tags": tags,
+        "topic": topic,  # CRITICAL: Add topic field for hard negative mining
         "confidentiality": "public",
-        "asset_type": asset_metadata["asset_type"],
-        "deal_type": asset_metadata["deal_type"],
-        "market": asset_metadata["market"],
-        "vintage": asset_metadata["vintage"],
-        "unit_count": asset_metadata["unit_count"],
-        "sqft": asset_metadata["sqft"],
-        "occupancy_pct": asset_metadata["occupancy_pct"],
-        "noi": asset_metadata["noi"],
-        "cap_rate": asset_metadata["cap_rate"],
-        "ltv": asset_metadata["ltv"],
-        "dscr": asset_metadata["dscr"]
+        "asset_type": asset_metadata.get("asset_type", "Multifamily"),
+        "deal_type": asset_metadata.get("deal_type", "Acquisition"),
+        "market": asset_metadata.get("market", "Boston, MA"),
+        "vintage": str(asset_metadata.get("vintage", "2000")),
+        "unit_count": asset_metadata.get("unit_count", 0),
+        "sqft": asset_metadata.get("sqft", 0),
+        "occupancy_pct": asset_metadata.get("occupancy_pct", 0.90),
+        "noi": asset_metadata.get("noi", "$0M"),
+        "cap_rate": asset_metadata.get("cap_rate", "5.0%"),
+        "ltv": asset_metadata.get("ltv", "65.0%"),
+        "dscr": asset_metadata.get("dscr", "1.40x")
     }
+    
+    # Validate critical fields
+    if not chunk["text"] or len(chunk["text"]) < 50:
+        raise ValueError(f"Chunk {chunk['chunk_id']} has invalid text (too short or empty)")
+    
+    if not chunk["chunk_id"] or chunk["chunk_id"] == "chunk_unknown":
+        raise ValueError(f"Chunk missing valid chunk_id")
+    
     out_file.write(json.dumps(chunk) + "\n")
     out_file.flush()
 

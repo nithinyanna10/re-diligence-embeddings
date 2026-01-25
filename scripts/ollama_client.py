@@ -11,7 +11,7 @@ import time
 from typing import Optional
 
 
-def run_ollama(model: str, prompt: str, timeout_s: int = 240, max_retries: int = 2) -> str:
+def run_ollama(model: str, prompt: str, timeout_s: int = 240, max_retries: int = 2, system: str = None) -> str:
     """
     Run Ollama model with prompt and return raw output.
     
@@ -34,11 +34,17 @@ def run_ollama(model: str, prompt: str, timeout_s: int = 240, max_retries: int =
             # Build command: ollama run <model> "<prompt>"
             # Ollama CLI accepts prompt as a positional argument
             # For very long prompts, we use stdin as fallback
-            if len(prompt) > 10000:  # Very long prompts via stdin
+            # If system message provided, prepend it
+            if system:
+                full_prompt = f"{system}\n\n{prompt}"
+            else:
+                full_prompt = prompt
+            
+            if len(full_prompt) > 10000:  # Very long prompts via stdin
                 cmd = ["ollama", "run", model]
                 result = subprocess.run(
                     cmd,
-                    input=prompt,
+                    input=full_prompt,
                     capture_output=True,
                     text=True,
                     timeout=timeout_s,
@@ -46,7 +52,7 @@ def run_ollama(model: str, prompt: str, timeout_s: int = 240, max_retries: int =
                 )
             else:
                 # Normal prompts as positional argument
-                cmd = ["ollama", "run", model, prompt]
+                cmd = ["ollama", "run", model, full_prompt]
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
