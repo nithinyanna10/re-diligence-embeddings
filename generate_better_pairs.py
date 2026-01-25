@@ -54,28 +54,46 @@ Format: ["query1", "query2", "query3", "query4", "query5"]"""
     try:
         response = run_ollama(model, prompt, max_retries=3, system=system_msg)
         
-        # Parse JSON array - handle "Thinking..." and "...done thinking."
+        # Parse JSON array - robust extraction with incomplete handling
         import re
         response = response.strip()
         
-        # Remove "Thinking..." and "...done thinking." patterns
-        # Find the JSON array after any thinking text
-        response = re.sub(r'Thinking[^\n]*\n', '', response, flags=re.IGNORECASE)
+        # Remove all "Thinking..." patterns and markdown
+        response = re.sub(r'Thinking[^\n]*\n?', '', response, flags=re.IGNORECASE | re.MULTILINE)
         response = re.sub(r'\.\.\.done thinking\.', '', response, flags=re.IGNORECASE)
         response = re.sub(r'\*\*[^\*]+\*\*', '', response)  # Remove markdown bold
+        response = re.sub(r'^[^\[\n]*\n', '', response, flags=re.MULTILINE)  # Remove lines before [
         
-        # Strategy 1: Find complete JSON array (balanced brackets)
-        json_match = re.search(r'\[[^\]]*(?:\[[^\]]*\][^\]]*)*\]', response, re.DOTALL)
-        if json_match:
-            response = json_match.group(0)
-        else:
-            # Strategy 2: Find first [ and try to find matching ]
-            first_bracket = response.find('[')
-            if first_bracket >= 0:
-                # Count brackets to find matching ]
-                bracket_count = 0
-                last_bracket = first_bracket
-                for i, char in enumerate(response[first_bracket:], first_bracket):
+        # Find the JSON array - look for opening bracket
+        first_bracket = response.find('[')
+        if first_bracket < 0:
+            raise ValueError("No JSON array found in response")
+        
+        # Extract from first bracket onwards
+        json_start = response[first_bracket:]
+        
+        # Strategy 1: Try to parse complete JSON
+        try:
+            # Find balanced brackets
+            bracket_count = 0
+            last_bracket = -1
+            in_string = False
+            escape_next = False
+            
+            for i, char in enumerate(json_start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                
+                if char == '\\':
+                    escape_next = True
+                    continue
+                
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                
+                if not in_string:
                     if char == '[':
                         bracket_count += 1
                     elif char == ']':
@@ -83,30 +101,30 @@ Format: ["query1", "query2", "query3", "query4", "query5"]"""
                         if bracket_count == 0:
                             last_bracket = i
                             break
+            
+            if last_bracket >= 0:
+                # Complete JSON found
+                response = json_start[:last_bracket + 1]
+                queries = json.loads(response)
+            else:
+                raise ValueError("Incomplete JSON")
                 
-                if bracket_count == 0:
-                    response = response[first_bracket:last_bracket + 1]
-                else:
-                    # Incomplete JSON - try to extract what we have
-                    json_match = re.search(r'\[.*', response[first_bracket:], re.DOTALL)
-                    if json_match:
-                        partial = json_match.group(0)
-                        # Try to close it
-                        if partial.count('[') > partial.count(']'):
-                            partial += ']' * (partial.count('[') - partial.count(']'))
-                        response = partial
-        
-        response = response.strip()
-        
-        # Clean up any remaining non-JSON text
-        response = re.sub(r'^[^\[]*', '', response)  # Remove text before [
-        response = re.sub(r'[^\]]*$', '', response)  # Remove text after ]
-        if not response.startswith('['):
-            response = '[' + response
-        if not response.endswith(']'):
-            response = response + ']'
-        
-        queries = json.loads(response)
+        except (ValueError, json.JSONDecodeError):
+            # Strategy 2: Extract complete strings from incomplete JSON
+            # Find all complete quoted strings (handles escaped quotes)
+            string_pattern = r'"((?:[^"\\]|\\.)*)"'
+            string_matches = re.findall(string_pattern, json_start)
+            
+            if len(string_matches) >= 1:
+                # Build complete JSON array from found strings
+                queries_list = string_matches[:5]
+                # Pad to 5 if needed
+                while len(queries_list) < 5:
+                    base = queries_list[0] if queries_list else f"query about {source_type}"
+                    queries_list.append(f"{base} query {len(queries_list) + 1}")
+                queries = queries_list
+            else:
+                raise ValueError("Could not extract queries from response")
         
         if not isinstance(queries, list):
             queries = [queries] if isinstance(queries, str) else []
