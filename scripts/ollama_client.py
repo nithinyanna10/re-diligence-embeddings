@@ -63,28 +63,8 @@ def run_ollama(model: str, prompt: str, timeout_s: int = 240, max_retries: int =
             
             output = result.stdout.strip()
             
-            # Try to extract JSON if wrapped in markdown or extra text
-            json_match = re.search(r'\{.*\}', output, re.DOTALL)
-            if json_match:
-                output = json_match.group(0)
-            
-            # Validate JSON if possible
-            try:
-                json.loads(output)
-            except json.JSONDecodeError:
-                if attempt < max_retries:
-                    # Retry with repair prompt
-                    repair_prompt = f"""The previous response was not valid JSON. Please return ONLY valid JSON, no markdown, no code blocks, no explanation.
-
-Original request:
-{prompt}
-
-Return STRICT JSON ONLY."""
-                    time.sleep(1)  # Brief delay before retry
-                    continue
-                else:
-                    raise ValueError(f"Failed to extract valid JSON after {max_retries + 1} attempts. Output: {output[:500]}")
-            
+            # Return raw output - let caller handle JSON extraction
+            # This allows for arrays, incomplete JSON, etc.
             return output
             
         except subprocess.TimeoutExpired:
