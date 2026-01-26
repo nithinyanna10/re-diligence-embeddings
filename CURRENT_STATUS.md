@@ -45,7 +45,7 @@
 python generate_better_pairs.py \
     --corpus data/corpus.jsonl \
     --output data/train_pairs_v2.jsonl \
-    --model gemini-3-flash-preview:cloud \
+    --model llama3.1:8b \
     --batch_size 10
 ```
 
@@ -117,7 +117,7 @@ python diagnose_eval.py
 python generate_better_pairs.py \
     --corpus data/corpus.jsonl \
     --output data/train_pairs_v2.jsonl \
-    --model gemini-3-flash-preview:cloud
+    --model llama3.1:8b
 ```
 
 ### Mine Hard Negatives
@@ -157,10 +157,14 @@ python test_model.py \
 
 **Start with Option 1** - Test the improved extraction:
 ```bash
+# First, pull the local model (one-time setup)
+ollama pull llama3.1:8b
+
+# Then generate pairs
 python generate_better_pairs.py \
     --corpus data/corpus.jsonl \
     --output data/train_pairs_v2.jsonl \
-    --model gemini-3-flash-preview:cloud \
+    --model llama3.1:8b \
     --batch_size 10
 ```
 
