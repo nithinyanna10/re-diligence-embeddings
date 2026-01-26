@@ -346,7 +346,7 @@ def write_corpus_chunk(out_file, chunk_data: Dict, doc_data: Dict, asset_metadat
 
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic RE diligence dataset")
-    parser.add_argument("--model", default="gemini-3-flash-preview:cloud", help="Ollama model name")
+    parser.add_argument("--model", default="llama3.1:8b", help="Ollama model name (local model, e.g., llama3.1:8b, mistral:7b)")
     parser.add_argument("--out_dir", default="data", help="Output directory")
     parser.add_argument("--companies", type=int, default=60, help="Number of companies/deals")
     parser.add_argument("--seed", type=int, default=7, help="Random seed")

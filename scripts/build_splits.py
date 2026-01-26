@@ -179,7 +179,7 @@ def main():
     parser.add_argument("--data_dir", default="data", help="Data directory")
     parser.add_argument("--target_train_pairs", type=int, default=15000, help="Target train pairs")
     parser.add_argument("--eval_queries", type=int, default=500, help="Number of eval queries")
-    parser.add_argument("--model", default="gemini-3-flash-preview:cloud", help="Ollama model")
+    parser.add_argument("--model", default="llama3.1:8b", help="Ollama model (local model, e.g., llama3.1:8b, mistral:7b)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     
     args = parser.parse_args()
