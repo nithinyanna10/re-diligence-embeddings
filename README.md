@@ -12,16 +12,22 @@ The dataset is designed for training embedding models that can semantically sear
 
 - **Python 3.10+**
 - **Ollama** installed and running locally
-- **Model**: `gemini-3-flash-preview:cloud` (or another Ollama model)
+- **Local Model**: `llama3.1:8b` (recommended) or `mistral:7b` (see [LOCAL_MODEL_SETUP.md](LOCAL_MODEL_SETUP.md))
 
 ### Setup
 
 1. Install Ollama: https://ollama.ai
 
-2. Pull the model:
+2. Pull a local model (no credits needed):
 ```bash
-ollama pull gemini-3-flash-preview:cloud
+# Recommended: Llama 3.1 8B (good balance of speed and quality)
+ollama pull llama3.1:8b
+
+# Alternative: Mistral 7B (excellent for JSON generation)
+ollama pull mistral:7b
 ```
+
+See [LOCAL_MODEL_SETUP.md](LOCAL_MODEL_SETUP.md) for detailed model comparison and setup.
 
 3. Install Python dependencies:
 ```bash
@@ -38,7 +44,7 @@ Generate the full corpus (~3,000 chunks across 60 deals):
 
 ```bash
 python scripts/generate_dataset.py \
-    --model gemini-3-flash-preview:cloud \
+    --model llama3.1:8b \
     --out_dir data \
     --companies 60 \
     --seed 7 \
@@ -56,7 +62,7 @@ python scripts/build_splits.py \
     --data_dir data \
     --target_train_pairs 15000 \
     --eval_queries 500 \
-    --model gemini-3-flash-preview:cloud \
+    --model llama3.1:8b \
     --seed 42
 ```
 
