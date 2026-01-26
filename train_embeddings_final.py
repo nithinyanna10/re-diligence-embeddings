@@ -30,27 +30,43 @@ def load_corpus(corpus_file):
 def load_train_pairs(pairs_file, corpus):
     """Load training pairs."""
     pairs = []
+    skipped = 0
     print(f"Loading train pairs from {pairs_file}...")
     
     with open(pairs_file, 'r') as f:
-        for line in tqdm(f, desc="Loading pairs"):
+        for line_num, line in enumerate(tqdm(f, desc="Loading pairs"), 1):
             if not line.strip():
                 continue
             
-            pair = json.loads(line)
-            query = pair['query']
+            try:
+                pair = json.loads(line)
+            except json.JSONDecodeError as e:
+                skipped += 1
+                if skipped <= 5:  # Only print first 5 errors
+                    print(f"⚠ Skipping malformed JSON on line {line_num}: {e}")
+                continue
+            
+            query = pair.get('query')
+            if not query:
+                continue
             
             # Get positive chunk
-            pos_chunk_id = pair['positive_chunk_id']
-            if pos_chunk_id not in corpus:
+            pos_chunk_id = pair.get('positive_chunk_id')
+            if not pos_chunk_id or pos_chunk_id not in corpus:
                 continue
             pos_chunk = corpus[pos_chunk_id]
             
             # Get negative chunks
             neg_chunks = []
-            for neg in pair['hard_negatives']:
-                neg_chunk_id = neg['chunk_id']
-                if neg_chunk_id in corpus:
+            hard_negatives = pair.get('hard_negatives', [])
+            if not isinstance(hard_negatives, list):
+                continue
+            
+            for neg in hard_negatives:
+                if not isinstance(neg, dict):
+                    continue
+                neg_chunk_id = neg.get('chunk_id')
+                if neg_chunk_id and neg_chunk_id in corpus:
                     neg_chunks.append(corpus[neg_chunk_id]['text'])
             
             if not neg_chunks:
@@ -62,6 +78,8 @@ def load_train_pairs(pairs_file, corpus):
                 'negative': neg_chunks[0]  # Use first negative
             })
     
+    if skipped > 0:
+        print(f"⚠ Skipped {skipped} malformed lines (out of {len(pairs) + skipped} total)")
     print(f"✓ Loaded {len(pairs)} training pairs")
     return pairs
 
