@@ -28,11 +28,20 @@ def load_corpus(corpus_file):
 def load_pairs(pairs_file):
     """Load existing pairs."""
     pairs = []
+    skipped = 0
     with open(pairs_file, 'r') as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             if not line.strip():
                 continue
-            pairs.append(json.loads(line))
+            try:
+                pairs.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                skipped += 1
+                if skipped <= 5:  # Only print first 5 errors
+                    print(f"⚠ Skipping malformed JSON on line {line_num}: {e}")
+                    print(f"   Line preview: {line[:200]}...")
+    if skipped > 0:
+        print(f"⚠ Skipped {skipped} malformed lines (out of {len(pairs) + skipped} total)")
     return pairs
 
 
