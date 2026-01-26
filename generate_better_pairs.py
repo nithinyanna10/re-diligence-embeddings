@@ -34,6 +34,7 @@ def generate_queries_for_chunk(chunk, model='gemini-3-flash-preview:cloud'):
     chunk_text = chunk['text']
     source_type = chunk.get('source_type', 'Unknown')
     topic = chunk.get('topic', 'General')
+    chunk_id = chunk.get('chunk_id', 'unknown')
     
     system_msg = "You are a JSON generator. Return ONLY valid JSON arrays. No thinking, no analysis, no explanations, no markdown."
     
@@ -51,105 +52,128 @@ Generate 5 queries:
 
 Format: ["query1", "query2", "query3", "query4", "query5"]"""
 
-    try:
-        response = run_ollama(model, prompt, max_retries=3, system=system_msg)
-        
-        # Parse JSON array - robust extraction with incomplete handling
-        import re
-        response = response.strip()
-        
-        # Remove all "Thinking..." patterns and markdown
-        response = re.sub(r'Thinking[^\n]*\n?', '', response, flags=re.IGNORECASE | re.MULTILINE)
-        response = re.sub(r'\.\.\.done thinking\.', '', response, flags=re.IGNORECASE)
-        response = re.sub(r'\*\*[^\*]+\*\*', '', response)  # Remove markdown bold
-        response = re.sub(r'^[^\[\n]*\n', '', response, flags=re.MULTILINE)  # Remove lines before [
-        
-        # Find the JSON array - look for opening bracket
-        first_bracket = response.find('[')
-        if first_bracket < 0:
-            raise ValueError("No JSON array found in response")
-        
-        # Extract from first bracket onwards
-        json_start = response[first_bracket:]
-        
-        # Strategy 1: Try to parse complete JSON
-        try:
-            # Find balanced brackets
-            bracket_count = 0
-            last_bracket = -1
-            in_string = False
-            escape_next = False
-            
-            for i, char in enumerate(json_start):
-                if escape_next:
-                    escape_next = False
-                    continue
-                
-                if char == '\\':
-                    escape_next = True
-                    continue
-                
-                if char == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                
-                if not in_string:
-                    if char == '[':
-                        bracket_count += 1
-                    elif char == ']':
-                        bracket_count -= 1
-                        if bracket_count == 0:
-                            last_bracket = i
-                            break
-            
-            if last_bracket >= 0:
-                # Complete JSON found
-                response = json_start[:last_bracket + 1]
-                queries = json.loads(response)
-            else:
-                raise ValueError("Incomplete JSON")
-                
-        except (ValueError, json.JSONDecodeError):
-            # Strategy 2: Extract complete strings from incomplete JSON
-            # Find all complete quoted strings (handles escaped quotes)
-            string_pattern = r'"((?:[^"\\]|\\.)*)"'
-            string_matches = re.findall(string_pattern, json_start)
-            
-            if len(string_matches) >= 1:
-                # Build complete JSON array from found strings
-                queries_list = string_matches[:5]
-                # Pad to 5 if needed
-                while len(queries_list) < 5:
-                    base = queries_list[0] if queries_list else f"query about {source_type}"
-                    queries_list.append(f"{base} query {len(queries_list) + 1}")
-                queries = queries_list
-            else:
-                raise ValueError("Could not extract queries from response")
-        
-        if not isinstance(queries, list):
-            queries = [queries] if isinstance(queries, str) else []
-        
-        # Ensure exactly 5 queries
-        if len(queries) < 5:
-            # Pad with variations
-            while len(queries) < 5:
-                base = queries[0] if queries else "query about this document"
-                queries.append(f"{base} (variation {len(queries) + 1})")
-        elif len(queries) > 5:
-            queries = queries[:5]
-        
-        return queries
+    import re
     
-    except Exception as e:
-        print(f"Error generating queries for {chunk.get('chunk_id', 'unknown')}: {e}")
-        # Fallback queries
-        return [
-            f"query about {source_type}",
-            f"what information about {topic}",
-            f"details regarding this {source_type}",
-            f"analysis of {topic}",
-            f"{source_type} document information"
-        ]
+    # Try up to 3 times with improved extraction
+    for attempt in range(3):
+        try:
+            response = run_ollama(model, prompt, max_retries=1, system=system_msg)
+            
+            # Parse JSON array - robust extraction with incomplete handling
+            response = response.strip()
+            
+            # Remove all "Thinking..." patterns and markdown (more aggressive)
+            response = re.sub(r'Thinking[^\n]*\n?', '', response, flags=re.IGNORECASE | re.MULTILINE)
+            response = re.sub(r'\.\.\.done thinking\.', '', response, flags=re.IGNORECASE)
+            response = re.sub(r'\*\*[^\*]+\*\*', '', response)  # Remove markdown bold
+            response = re.sub(r'```json\s*', '', response, flags=re.IGNORECASE)  # Remove code blocks
+            response = re.sub(r'```\s*', '', response)
+            response = re.sub(r'^[^\[\n]*\n', '', response, flags=re.MULTILINE)  # Remove lines before [
+            
+            # Find the JSON array - look for opening bracket
+            first_bracket = response.find('[')
+            if first_bracket < 0:
+                # Try to find any quoted strings even without brackets
+                string_pattern = r'"((?:[^"\\]|\\.)*)"'
+                string_matches = re.findall(string_pattern, response)
+                if len(string_matches) >= 1:
+                    queries_list = string_matches[:5]
+                    while len(queries_list) < 5:
+                        base = queries_list[0] if queries_list else f"query about {source_type}"
+                        queries_list.append(f"{base} query {len(queries_list) + 1}")
+                    return queries_list
+                # No strings found, try next attempt
+                if attempt < 2:
+                    continue
+                raise ValueError("No JSON array or strings found in response")
+            
+            # Extract from first bracket onwards
+            json_start = response[first_bracket:]
+            
+            # Strategy 1: Try to parse complete JSON
+            try:
+                # Find balanced brackets
+                bracket_count = 0
+                last_bracket = -1
+                in_string = False
+                escape_next = False
+                
+                for i, char in enumerate(json_start):
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    
+                    if char == '\\':
+                        escape_next = True
+                        continue
+                    
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    
+                    if not in_string:
+                        if char == '[':
+                            bracket_count += 1
+                        elif char == ']':
+                            bracket_count -= 1
+                            if bracket_count == 0:
+                                last_bracket = i
+                                break
+                
+                if last_bracket >= 0:
+                    # Complete JSON found
+                    json_str = json_start[:last_bracket + 1]
+                    queries = json.loads(json_str)
+                    if isinstance(queries, list) and len(queries) > 0:
+                        # Ensure exactly 5 queries
+                        if len(queries) < 5:
+                            while len(queries) < 5:
+                                base = queries[0] if queries else f"query about {source_type}"
+                                queries.append(f"{base} variation {len(queries) + 1}")
+                        elif len(queries) > 5:
+                            queries = queries[:5]
+                        return queries
+                    else:
+                        raise ValueError("Empty or invalid list")
+                else:
+                    raise ValueError("Incomplete JSON - no closing bracket")
+                    
+            except (ValueError, json.JSONDecodeError) as e:
+                # Strategy 2: Extract complete strings from incomplete JSON
+                # Find all complete quoted strings (handles escaped quotes)
+                string_pattern = r'"((?:[^"\\]|\\.)*)"'
+                string_matches = re.findall(string_pattern, json_start)
+                
+                if len(string_matches) >= 1:
+                    # Build complete JSON array from found strings
+                    queries_list = string_matches[:5]  # Take first 5
+                    # Pad to 5 if needed
+                    while len(queries_list) < 5:
+                        base = queries_list[0] if queries_list else f"query about {source_type}"
+                        queries_list.append(f"{base} query {len(queries_list) + 1}")
+                    return queries_list
+                else:
+                    # Couldn't extract strings, try next attempt
+                    if attempt < 2:
+                        continue
+                    raise ValueError(f"Could not extract queries from response: {str(e)}")
+        
+        except Exception as e:
+            if attempt < 2:
+                # Retry
+                continue
+            # Final attempt failed
+            print(f"Warning: Failed to extract queries after 3 attempts for {chunk_id}: {e}")
+    
+    # If all attempts failed, use fallback queries
+    print(f"Warning: Using fallback queries for {chunk_id}")
+    return [
+        f"query about {source_type}",
+        f"what information about {topic}",
+        f"details regarding this {source_type}",
+        f"analysis of {topic}",
+        f"{source_type} document information"
+    ]
 
 
 def find_hard_negatives(chunk_id, chunk, corpus, num_negatives=3):
@@ -268,7 +292,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate better training pairs")
     parser.add_argument('--corpus', default='data/corpus.jsonl', help='Corpus file')
     parser.add_argument('--output', default='data/train_pairs_v2.jsonl', help='Output pairs file')
-    parser.add_argument('--model', default='gemini-3-flash-preview:cloud', help='Ollama model')
+    parser.add_argument('--model', default='llama3.1:8b', help='Ollama model (local model, e.g., llama3.1:8b, mistral:7b)')
     parser.add_argument('--batch_size', type=int, default=10, help='Batch size for processing')
     
     args = parser.parse_args()
