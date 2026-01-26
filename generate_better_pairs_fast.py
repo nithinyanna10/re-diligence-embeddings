@@ -1,0 +1,365 @@
+#!/usr/bin/env python3
+"""
+Generate better training pairs with diverse query types and proper hard negatives.
+OPTIMIZED VERSION: Processes chunks in parallel for faster generation.
+Target: 5 queries per chunk = ~15k pairs.
+"""
+
+import json
+import argparse
+from pathlib import Path
+from tqdm import tqdm
+import random
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+
+# Add scripts directory to path
+sys.path.insert(0, str(Path(__file__).parent / 'scripts'))
+from ollama_client import run_ollama
+
+
+def load_corpus(corpus_file):
+    """Load corpus."""
+    corpus = {}
+    with open(corpus_file, 'r') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            chunk = json.loads(line)
+            corpus[chunk['chunk_id']] = chunk
+    return corpus
+
+
+def generate_queries_for_chunk(chunk, model='mistral:7b'):
+    """Generate 5 diverse queries for a chunk."""
+    
+    chunk_text = chunk['text']
+    source_type = chunk.get('source_type', 'Unknown')
+    topic = chunk.get('topic', 'General')
+    chunk_id = chunk.get('chunk_id', 'unknown')
+    
+    system_msg = "You are a JSON generator. Return ONLY valid JSON arrays. No thinking, no analysis, no explanations, no markdown."
+    
+    prompt = f"""Return ONLY a JSON array with 5 search queries.
+
+Chunk: {chunk_text[:800]}
+Source: {source_type}, Topic: {topic}
+
+Generate 5 queries:
+1. Short keyword (3-8 words)
+2. Question format  
+3. Clause hunt (SNDA, estoppel, CAM, DSCR, WALE)
+4. Financial/metrics query
+5. Document-specific query
+
+Format: ["query1", "query2", "query3", "query4", "query5"]"""
+
+    import re
+    
+    # Try up to 2 times (reduced from 3 for speed)
+    for attempt in range(2):
+        try:
+            response = run_ollama(model, prompt, max_retries=1, system=system_msg, timeout_s=60)
+            
+            # Parse JSON array - robust extraction with incomplete handling
+            response = response.strip()
+            
+            # Remove all "Thinking..." patterns and markdown (more aggressive)
+            response = re.sub(r'Thinking[^\n]*\n?', '', response, flags=re.IGNORECASE | re.MULTILINE)
+            response = re.sub(r'\.\.\.done thinking\.', '', response, flags=re.IGNORECASE)
+            response = re.sub(r'\*\*[^\*]+\*\*', '', response)  # Remove markdown bold
+            response = re.sub(r'```json\s*', '', response, flags=re.IGNORECASE)  # Remove code blocks
+            response = re.sub(r'```\s*', '', response)
+            response = re.sub(r'^[^\[\n]*\n', '', response, flags=re.MULTILINE)  # Remove lines before [
+            
+            # Find the JSON array - look for opening bracket
+            first_bracket = response.find('[')
+            if first_bracket < 0:
+                # Try to find any quoted strings even without brackets
+                string_pattern = r'"((?:[^"\\]|\\.)*)"'
+                string_matches = re.findall(string_pattern, response)
+                if len(string_matches) >= 1:
+                    queries_list = string_matches[:5]
+                    while len(queries_list) < 5:
+                        base = queries_list[0] if queries_list else f"query about {source_type}"
+                        queries_list.append(f"{base} query {len(queries_list) + 1}")
+                    return queries_list
+                # No strings found, try next attempt
+                if attempt < 1:
+                    continue
+                raise ValueError("No JSON array or strings found in response")
+            
+            # Extract from first bracket onwards
+            json_start = response[first_bracket:]
+            
+            # Strategy 1: Try to parse complete JSON
+            try:
+                # Find balanced brackets
+                bracket_count = 0
+                last_bracket = -1
+                in_string = False
+                escape_next = False
+                
+                for i, char in enumerate(json_start):
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    
+                    if char == '\\':
+                        escape_next = True
+                        continue
+                    
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+                        continue
+                    
+                    if not in_string:
+                        if char == '[':
+                            bracket_count += 1
+                        elif char == ']':
+                            bracket_count -= 1
+                            if bracket_count == 0:
+                                last_bracket = i
+                                break
+                
+                if last_bracket >= 0:
+                    # Complete JSON found
+                    json_str = json_start[:last_bracket + 1]
+                    queries = json.loads(json_str)
+                    if isinstance(queries, list) and len(queries) > 0:
+                        # Ensure exactly 5 queries
+                        if len(queries) < 5:
+                            while len(queries) < 5:
+                                base = queries[0] if queries else f"query about {source_type}"
+                                queries.append(f"{base} variation {len(queries) + 1}")
+                        elif len(queries) > 5:
+                            queries = queries[:5]
+                        return queries
+                    else:
+                        raise ValueError("Empty or invalid list")
+                else:
+                    raise ValueError("Incomplete JSON - no closing bracket")
+                    
+            except (ValueError, json.JSONDecodeError) as e:
+                # Strategy 2: Extract complete strings from incomplete JSON
+                # Find all complete quoted strings (handles escaped quotes)
+                string_pattern = r'"((?:[^"\\]|\\.)*)"'
+                string_matches = re.findall(string_pattern, json_start)
+                
+                if len(string_matches) >= 1:
+                    # Build complete JSON array from found strings
+                    queries_list = string_matches[:5]  # Take first 5
+                    # Pad to 5 if needed
+                    while len(queries_list) < 5:
+                        base = queries_list[0] if queries_list else f"query about {source_type}"
+                        queries_list.append(f"{base} query {len(queries_list) + 1}")
+                    return queries_list
+                else:
+                    # Couldn't extract strings, try next attempt
+                    if attempt < 1:
+                        continue
+                    raise ValueError(f"Could not extract queries from response: {str(e)}")
+        
+        except Exception as e:
+            if attempt < 1:
+                # Retry
+                continue
+            # Final attempt failed
+            break
+    
+    # If all attempts failed, use fallback queries
+    return [
+        f"query about {source_type}",
+        f"what information about {topic}",
+        f"details regarding this {source_type}",
+        f"analysis of {topic}",
+        f"{source_type} document information"
+    ]
+
+
+def find_hard_negatives(chunk_id, chunk, corpus, num_negatives=3):
+    """Find hard negatives: same asset/company, different topic/source."""
+    
+    company = chunk.get('company', '')
+    asset_type = chunk.get('asset_type', '')
+    topic = chunk.get('topic', '')
+    source_type = chunk.get('source_type', '')
+    chunk_text = chunk.get('text', '')
+    
+    candidates = []
+    
+    for other_id, other_chunk in corpus.items():
+        if other_id == chunk_id:
+            continue
+        
+        # Hard negative criteria:
+        # 1. Same company/asset but different topic/source
+        # 2. Or same source type but different topic
+        # 3. Or similar but different document type
+        
+        other_company = other_chunk.get('company', '')
+        other_topic = other_chunk.get('topic', '')
+        other_source = other_chunk.get('source_type', '')
+        
+        is_hard_negative = False
+        
+        # Same company, different topic
+        if company and other_company == company and other_topic != topic:
+            is_hard_negative = True
+        
+        # Same source type, different topic
+        if source_type and other_source == source_type and other_topic != topic:
+            is_hard_negative = True
+        
+        # Confusable pairs (CAM vs taxes, Phase I vs PCA, etc.)
+        confusable_pairs = [
+            ('CAM', 'taxes'), ('CAM', 'insurance'),
+            ('Phase I', 'PCA'), ('Phase I', 'Phase II'),
+            ('Title', 'ALTA'), ('Lease', 'Rent Roll'),
+            ('DSCR', 'debt yield'), ('NOI', 'EBITDA')
+        ]
+        
+        for term1, term2 in confusable_pairs:
+            if (term1 in chunk_text and term2 in other_chunk['text']) or \
+               (term2 in chunk_text and term1 in other_chunk['text']):
+                is_hard_negative = True
+                break
+        
+        if is_hard_negative:
+            candidates.append({
+                'chunk_id': other_id,
+                'topic': other_topic,
+                'source_type': other_source,
+                'text_preview': other_chunk['text'][:100]
+            })
+    
+    # Randomly sample
+    if len(candidates) >= num_negatives:
+        return random.sample(candidates, num_negatives)
+    else:
+        return candidates
+
+
+def process_chunk(chunk_id, chunk, corpus, model):
+    """Process a single chunk and return pairs."""
+    try:
+        # Generate queries
+        queries = generate_queries_for_chunk(chunk, model)
+        
+        # Find hard negatives
+        hard_negatives = find_hard_negatives(chunk_id, chunk, corpus, num_negatives=3)
+        
+        if not hard_negatives:
+            return None
+        
+        # Create pairs (one per query)
+        pairs = []
+        for query in queries:
+            pair = {
+                'query': query,
+                'positive_chunk_id': chunk_id,
+                'hard_negatives': hard_negatives[:3]  # Use up to 3
+            }
+            pairs.append(pair)
+        
+        return pairs
+    except Exception as e:
+        print(f"Error processing {chunk_id}: {e}")
+        return None
+
+
+def generate_pairs(corpus, output_file, model='mistral:7b', max_workers=8):
+    """Generate training pairs with parallel processing."""
+    
+    chunk_ids = list(corpus.keys())
+    total_chunks = len(chunk_ids)
+    
+    print(f"Generating pairs for {total_chunks} chunks...")
+    print(f"Target: ~{total_chunks * 5} pairs (5 queries per chunk)")
+    print(f"Using {max_workers} parallel workers")
+    print()
+    
+    pairs = []
+    failed_chunks = 0
+    processed = 0
+    
+    with open(output_file, 'w') as f, ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_chunk = {
+            executor.submit(process_chunk, chunk_id, corpus[chunk_id], corpus, model): chunk_id
+            for chunk_id in chunk_ids
+        }
+        
+        # Process completed tasks with progress bar
+        with tqdm(total=total_chunks, desc="Processing chunks") as pbar:
+            for future in as_completed(future_to_chunk):
+                chunk_id = future_to_chunk[future]
+                try:
+                    result = future.result()
+                    if result:
+                        for pair in result:
+                            pairs.append(pair)
+                            f.write(json.dumps(pair) + '\n')
+                            f.flush()
+                    else:
+                        failed_chunks += 1
+                except Exception as e:
+                    print(f"\nError processing {chunk_id}: {e}")
+                    failed_chunks += 1
+                
+                processed += 1
+                pbar.update(1)
+                pbar.set_postfix({
+                    'Pairs': len(pairs),
+                    'Failed': failed_chunks,
+                    'Avg/Chunk': f"{len(pairs) / max(processed - failed_chunks, 1):.1f}"
+                })
+    
+    print(f"\n✓ Generated {len(pairs)} training pairs")
+    print(f"  Failed chunks (no hard negatives): {failed_chunks}")
+    print(f"  Average queries per chunk: {len(pairs) / (total_chunks - failed_chunks):.2f}")
+    
+    return len(pairs)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate better training pairs (FAST VERSION)")
+    parser.add_argument('--corpus', default='data/corpus.jsonl', help='Corpus file')
+    parser.add_argument('--output', default='data/train_pairs_v2.jsonl', help='Output pairs file')
+    parser.add_argument('--model', default='mistral:7b', help='Ollama model (local model, e.g., llama3.1:8b, mistral:7b)')
+    parser.add_argument('--workers', type=int, default=8, help='Number of parallel workers (default: 8, increase for more RAM/CPU)')
+    
+    args = parser.parse_args()
+    
+    print("="*70)
+    print("GENERATING BETTER TRAINING PAIRS (FAST VERSION)")
+    print("="*70)
+    print(f"Corpus: {args.corpus}")
+    print(f"Output: {args.output}")
+    print(f"Model: {args.model}")
+    print(f"Workers: {args.workers}")
+    print("="*70)
+    print()
+    
+    # Load corpus
+    corpus = load_corpus(args.corpus)
+    print(f"Loaded {len(corpus)} chunks")
+    print()
+    
+    # Generate pairs
+    num_pairs = generate_pairs(corpus, args.output, args.model, args.workers)
+    
+    print()
+    print("="*70)
+    print("COMPLETE!")
+    print("="*70)
+    print(f"✓ Generated {num_pairs} training pairs")
+    print(f"  File: {args.output}")
+    print()
+    print("Next: Train with these pairs:")
+    print(f"  python train_embeddings_final.py --train_pairs {args.output}")
+
+
+if __name__ == "__main__":
+    main()
