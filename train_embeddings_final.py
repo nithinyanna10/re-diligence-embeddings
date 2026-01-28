@@ -11,6 +11,7 @@ from torch.optim import AdamW
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
+import itertools
 
 
 def load_corpus(corpus_file):
@@ -56,7 +57,7 @@ def load_train_pairs(pairs_file, corpus):
                 continue
             pos_chunk = corpus[pos_chunk_id]
             
-            # Get negative chunks
+            # Get negative chunks (keep all available hard negatives)
             neg_chunks = []
             hard_negatives = pair.get('hard_negatives', [])
             if not isinstance(hard_negatives, list):
@@ -75,7 +76,8 @@ def load_train_pairs(pairs_file, corpus):
             pairs.append({
                 'query': query,
                 'positive': pos_chunk['text'],
-                'negative': neg_chunks[0]  # Use first negative
+                # Store all negatives so we can use them with in-batch contrastive loss
+                'negatives': neg_chunks
             })
     
     if skipped > 0:
@@ -93,7 +95,7 @@ def train_model(
     batch_size=32,
     learning_rate=2e-5
 ):
-    """Train embedding model using manual triplet loss."""
+    """Train embedding model using in-batch contrastive loss with hard negatives."""
     
     print("="*70)
     print("TRAINING RE-DILIGENCE EMBEDDINGS")
@@ -158,48 +160,67 @@ def train_model(
             
             optimizer.zero_grad()
             
-            # Encode queries, positives, negatives with gradients enabled
+            # Encode queries and documents (positives + all hard negatives) with gradients enabled
             queries = [p['query'] for p in batch]
             positives = [p['positive'] for p in batch]
-            negatives = [p['negative'] for p in batch]
+            # Flatten all negatives in the batch so each query sees:
+            # - its own positive as the correct class
+            # - all other positives + all negatives as contrasting examples
+            negatives = list(itertools.chain.from_iterable(
+                p.get('negatives', []) for p in batch
+            ))
+            docs = positives + negatives
             
             # Use model's tokenizer and forward pass to get embeddings with gradients
             # Access the tokenizer from the first module
             tokenizer = model._first_module().tokenizer
             
             # Tokenize all texts
-            query_features = tokenizer(queries, padding=True, truncation=True, return_tensors='pt', max_length=512)
-            pos_features = tokenizer(positives, padding=True, truncation=True, return_tensors='pt', max_length=512)
-            neg_features = tokenizer(negatives, padding=True, truncation=True, return_tensors='pt', max_length=512)
+            query_features = tokenizer(
+                queries,
+                padding=True,
+                truncation=True,
+                return_tensors='pt',
+                max_length=512,
+            )
+            doc_features = tokenizer(
+                docs,
+                padding=True,
+                truncation=True,
+                return_tensors='pt',
+                max_length=512,
+            )
             
             # Move to device
             device = next(model.parameters()).device
             query_features = {k: v.to(device) for k, v in query_features.items()}
-            pos_features = {k: v.to(device) for k, v in pos_features.items()}
-            neg_features = {k: v.to(device) for k, v in neg_features.items()}
+            doc_features = {k: v.to(device) for k, v in doc_features.items()}
             
             # Forward pass through model (with gradients)
             query_output = model(query_features)
-            pos_output = model(pos_features)
-            neg_output = model(neg_features)
+            doc_output = model(doc_features)
             
             query_embeddings = query_output['sentence_embedding']
-            pos_embeddings = pos_output['sentence_embedding']
-            neg_embeddings = neg_output['sentence_embedding']
+            doc_embeddings = doc_output['sentence_embedding']
             
             # Normalize embeddings
             query_embeddings = F.normalize(query_embeddings, p=2, dim=1)
-            pos_embeddings = F.normalize(pos_embeddings, p=2, dim=1)
-            neg_embeddings = F.normalize(neg_embeddings, p=2, dim=1)
+            doc_embeddings = F.normalize(doc_embeddings, p=2, dim=1)
             
-            # Compute triplet loss manually
-            # Loss = max(0, margin - (pos_sim - neg_sim))
-            # We want pos_sim > neg_sim, so maximize pos_sim - neg_sim
-            pos_sim = (query_embeddings * pos_embeddings).sum(dim=1)  # Cosine similarity
-            neg_sim = (query_embeddings * neg_embeddings).sum(dim=1)
+            # In-batch contrastive loss:
+            # - For batch size B, we treat the first B documents as the positives,
+            #   aligned positionally with the B queries.
+            # - All other documents (remaining positives and all negatives) act as
+            #   implicit negatives.
+            batch_size_actual = len(batch)
+            logits = torch.matmul(query_embeddings, doc_embeddings.T)  # (B, D)
             
-            margin = 0.5
-            loss = F.relu(margin - (pos_sim - neg_sim)).mean()
+            # Temperature-scaled cross-entropy where the correct class for query i
+            # is its own positive at index i
+            temperature = 0.05
+            logits = logits / temperature
+            targets = torch.arange(batch_size_actual, device=device, dtype=torch.long)
+            loss = F.cross_entropy(logits, targets)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -232,7 +253,7 @@ def train_model(
 
 def main():
     parser = argparse.ArgumentParser(description="Train RE-Diligence embeddings")
-    parser.add_argument('--model', default='sentence-transformers/all-MiniLM-L6-v2', help='Base model name')
+    parser.add_argument('--model', default='BAAI/bge-base-en-v1.5', help='Base model name')
     parser.add_argument('--train_pairs', default='data/train_pairs.jsonl', help='Training pairs file')
     parser.add_argument('--corpus', default='data/corpus.jsonl', help='Corpus file')
     parser.add_argument('--output_dir', default='models/re-diligence-embeddings', help='Output directory')
